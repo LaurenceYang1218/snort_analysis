@@ -12,7 +12,7 @@
 #include "dfc/match_func.h"
 #include <float.h>
 
-#define MAX_BUF 3000
+#define MAX_BUF 10000
 #define INPUT_SIZE 1000000 // byte
 #define RANDOM_TEXT 1 // 0: no random, 1: random
 #define TEXT_SIZE 1500 // MUST be multiples of 4
@@ -22,6 +22,7 @@ struct Entry * loadRules(int argc, char **argv, int *num);
 struct Entry * loadRulesDir(char **argv, int *num);
 struct Entry * loadRulesRegular(char *filePath, int *num);
 void parseContentOptions(struct Entry *lst, int *num);
+void parseRegexOptions(struct Entry *lst, int *num);
 void genText(struct Entry *lst, int *num, int random);
 void runMPM(struct Entry *lst, int num);
 void constructMPMStructs(struct Entry *lst, int num);
@@ -29,6 +30,7 @@ void detection(struct Entry *lst, int num);
 void fast_srand(int seed);
 
 static unsigned int g_seed;
+
 
 int main(int argc, char **argv){
     // 1. Loads rules and generate test payload.
@@ -41,13 +43,17 @@ int main(int argc, char **argv){
     }
 
     //* start to analyze the function
+    int regex_total = 0, rules_total = 0;
     printf("Total number of files %d\n", num);
     for(int i=0;i<num;i++) {
-        printf("File name: %s\n", inputList->ruleFileName);
-        printf("# rules: %d\n", inputList->numOfRules);
-        printf("# contents: %d\n", inputList->numOfContents);
+        regex_total += inputList[i].numOfRegex;
+        rules_total += inputList[i].numOfRules;
+        printf("File name: %s\n", inputList[i].ruleFileName);
+        printf("# rules: %d\n", inputList[i].numOfRules);
+        printf("# contents: %d\n", inputList[i].numOfContents);
+        printf("# regex: %d\n", inputList[i].numOfRegex);
     }
-
+    printf("The ratio of regex among all rules: %.4f\n", (float)regex_total / rules_total);
     return 0;
 }
 
@@ -183,10 +189,12 @@ struct Entry * loadAndGen(int argc, char **argv, int *num){
     printf("Loading rule files ... ");
     struct Entry *inputList = loadRules(argc, argv, num);
     printf("Done. (# rule files: %d)\n", *num);
-
+    
+    
     // 2. parses content options
     printf("Parsing rules ... ");
     parseContentOptions(inputList, num);
+    parseRegexOptions(inputList, num);
     printf("Done.\n");
 
     // 3. generates test payloads
@@ -247,9 +255,17 @@ void genText(struct Entry *lst, int *num, int random){
     }
 }
 
+
 void parseContentOptions(struct Entry *lst, int *num){
     int i, j;
-
+    // --------------------------------------------------------------
+    int* freq = (int *)calloc(128, sizeof(int));
+    memset(freq, 128, sizeof(freq));
+    int* length = (int *)calloc(300, sizeof(int));
+    memset(length, 0, sizeof(length));
+    FILE *fp = NULL;
+    fp = fopen("output.txt", "w+");
+    // --------------------------------------------------------------
     for (i = 0; i < *num; i++){
         for (j = 0; j < lst[i].numOfRules; j++){
             char *p1 = lst[i].rules[j];
@@ -273,7 +289,14 @@ void parseContentOptions(struct Entry *lst, int *num){
                 lst[i].contents[lst[i].numOfContents] = (char*)malloc(sizeof(char) * (p1-p2+1));
                 strncpy(lst[i].contents[lst[i].numOfContents], p2, p1-p2);
                 lst[i].contents[lst[i].numOfContents][p1-p2] = '\0';
-
+                // ---------------------------------------------------------
+                int len = strlen(lst[i].contents[lst[i].numOfContents]);
+                for(int k = 0; k < len; k++){
+                    int index = (int)lst[i].contents[lst[i].numOfContents][k];
+                    freq[index]++;
+                }
+                length[len]++;
+                // ---------------------------------------------------------
                 // set noCase
                 if(strncmp("nocase", p1+3, 6) == 0)
                     lst[i].noCase[lst[i].numOfContents] = 1;
@@ -285,6 +308,70 @@ void parseContentOptions(struct Entry *lst, int *num){
             }
         }
     }
+    
+    // ---------------------------------------------------
+    for(int k = 0; k < 128; k++){
+        fprintf(fp, "ascii %d occurence %d\n", k, freq[k]);
+    }
+    for(int k = 0; k < 300; k++){
+        fprintf(fp, "length %d %d\n", k, length[k]);
+    }
+    fclose(fp);
+    // ---------------------------------------------------
+    return;
+}
+void parseRegexOptions(struct Entry *lst, int *num){
+    int i, j;
+    // --------------------------------------------------------------
+    FILE *fp = NULL, *fp2 = NULL;
+    fp = fopen("regex.txt", "w+");
+    fp2 = fopen("states.txt", "w+");
+    int *states = (int *)calloc(500, sizeof(int));
+    // --------------------------------------------------------------
+    for (i = 0; i < *num; i++){
+        for (j = 0; j < lst[i].numOfRules; j++){
+            char *p1 = lst[i].rules[j];
+            char *p2, *tmp;
+
+            while(1){
+                p2 = strstr(p1, "pcre:\"");
+
+                if (p2 == NULL)
+                    break;
+
+                p2 += 6;
+                p1 = strstr(p2, "\";");
+                lst[i].regex=(char**)realloc(lst[i].regex,
+                                    sizeof(char*)*(lst[i].numOfRegex+1));
+                // copy content
+                lst[i].regex[lst[i].numOfRegex] = (char*)malloc(sizeof(char) * (p1-p2+1));
+                strncpy(lst[i].regex[lst[i].numOfRegex], p2, p1-p2);
+                lst[i].regex[lst[i].numOfRegex][p1-p2] = '\0';
+                int numOfStates = 0;
+                for(int k = 0; k < strlen(lst[i].regex[lst[i].numOfRegex]); k++){
+                    if(lst[i].regex[lst[i].numOfRegex][k] == '|' || 
+                        lst[i].regex[lst[i].numOfRegex][k] == '^' || 
+                        lst[i].regex[lst[i].numOfRegex][k] == '+' ||
+                        lst[i].regex[lst[i].numOfRegex][k] == '?' ||
+                        lst[i].regex[lst[i].numOfRegex][k] == '.' 
+                    )
+                        numOfStates++;
+                }
+                states[numOfStates]++;
+                fprintf(fp, lst[i].regex[lst[i].numOfRegex]);
+                fprintf(fp, "\n");
+
+                lst[i].numOfRegex++;
+            }
+        }
+    }
+    for(int i = 0; i < 500; ++i){
+        fprintf(fp2, " %d states %d\n", i, states[i]);
+    }
+    free(states);
+    fclose(fp);
+    fclose(fp2);
+    return;
 }
 
 int isDirectory(const char *path)
